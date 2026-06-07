@@ -61,36 +61,57 @@ def _ear(pts):
 
 class FaceController:
     def __init__(self,
-                 ear_closed=0.21,     # abaixo disso o olho conta como fechado
-                 ear_open=0.27,       # acima disso o olho conta como aberto
-                 wink_diff=0.06,      # assimetria minima para distinguir wink de piscada
-                 deadzone=0.06,       # zona morta da cabeca (sensibilidade)
-                 repeat_delay=0.45,   # tempo entre passos do cursor ao segurar a cabeca
-                 smooth=0.5):         # suavizacao (0=sem, 1=travado)
+                 ear_closed=0.21,      # abaixo disso o olho conta como fechado
+                 ear_open=0.27,        # acima disso o olho conta como aberto
+                 wink_diff=0.06,       # assimetria minima p/ distinguir wink de piscada
+                 deadzone=0.04,        # zona "centro": dentro dela o gesto re-arma
+                 trigger=0.085,        # passar disso dispara um passo (gatilho)
+                 hold_delay=0.6,       # tempo segurando antes de comecar a auto-repetir
+                 repeat_rate=0.45,     # intervalo entre passos na auto-repeticao
+                 max_repeats=7,        # limite de passos seguidos sem voltar ao centro
+                 smooth=0.4,           # suavizacao (0=sem, ~1=travado)
+                 stable_band=0.03,     # variacao max. p/ considerar a cabeca "parada"
+                 stable_time=0.8,      # tempo parado p/ re-centrar automaticamente
+                 idle_recenter=1.0):   # so re-centra se nao houve passo recente
         self.ear_closed = ear_closed
         self.ear_open = ear_open
         self.wink_diff = wink_diff
         self.deadzone = deadzone
-        self.repeat_delay = repeat_delay
+        self.trigger = max(trigger, deadzone + 0.01)
+        self.hold_delay = hold_delay
+        self.repeat_rate = repeat_rate
+        self.max_repeats = max_repeats
         self.smooth = smooth
+        self.stable_band = stable_band
+        self.stable_time = stable_time
+        self.idle_recenter = idle_recenter
 
-        # Estado de calibracao (posicao neutra do nariz)
+        # Calibracao (posicao neutra da cabeca)
         self.calibrated = False
         self._neutral = None
         self._calib_samples = []
-        self._calib_target = 8
+        self._calib_target = 5
 
-        # Suavizacao do offset da cabeca
+        # Offset suavizado (relativo ao neutro)
         self._sx = 0.0
         self._sy = 0.0
+        self._dx = 0.0          # ultimos valores (p/ HUD)
+        self._dy = 0.0
 
         # Estado de wink (histerese por olho)
         self._left_closed = False
         self._right_closed = False
 
-        # Estado de passo do cursor
-        self._held = None
-        self._next_step = 0.0
+        # Controle de movimento (gesto "inclina-e-volta" + auto-repeticao)
+        self._armed = False      # True quando a cabeca passou pelo centro
+        self._active_dir = None  # direcao da auto-repeticao em andamento
+        self._next_repeat = 0.0
+        self._repeat_count = 0
+        self._last_step_time = 0.0
+
+        # Deteccao de "cabeca parada" p/ re-centragem automatica
+        self._stable_ref = None
+        self._stable_since = 0.0
 
         self.backend = "nenhum"
         self._landmarker = None
@@ -114,10 +135,14 @@ class FaceController:
 
     # ------------------------------------------------------------------ #
     def calibrate(self):
-        """Marca para recalibrar a posicao neutra da cabeca."""
+        """Recalibra: o 'centro' passa a ser a pose atual da cabeca."""
         self.calibrated = False
         self._neutral = None
         self._calib_samples = []
+        self._armed = False
+        self._active_dir = None
+        self._repeat_count = 0
+        self._stable_ref = None
 
     # ------------------------------------------------------------------ #
     def process(self, frame):
@@ -178,6 +203,27 @@ class FaceController:
         cv2.circle(disp, fx(nose), 4, (255, 200, 0), -1)
         cv2.circle(disp, fx(eye_mid), 3, (255, 120, 0), -1)
 
+        # ---- HUD: posicao da cabeca x zona morta (verde) e gatilho (azul) ----
+        cxh, cyh, R = 92, 96, 70
+        ddx, ddy = state.get("dx", 0.0), state.get("dy", 0.0)
+        dz = int(self.deadzone / self.trigger * R * 0.82)
+        tg = int(R * 0.82)
+        cv2.rectangle(disp, (cxh - R, cyh - R), (cxh + R, cyh + R), (35, 35, 35), -1)
+        cv2.rectangle(disp, (cxh - tg, cyh - tg), (cxh + tg, cyh + tg), (200, 120, 60), 1)
+        cv2.rectangle(disp, (cxh - dz, cyh - dz), (cxh + dz, cyh + dz), (90, 200, 90), 1)
+        # ponto da cabeca (x espelhado p/ bater com a imagem)
+        ppx = int(cxh - max(-1.5, min(1.5, ddx / self.trigger)) * R * 0.82)
+        ppy = int(cyh + max(-1.5, min(1.5, ddy / self.trigger)) * R * 0.82)
+        if abs(ddx) < self.deadzone and abs(ddy) < self.deadzone:
+            dot = (90, 230, 90)      # no centro (verde)
+        elif abs(ddx) >= self.trigger or abs(ddy) >= self.trigger:
+            dot = (60, 60, 240)      # disparando (vermelho)
+        else:
+            dot = (60, 200, 240)     # zona intermediaria (amarelo)
+        cv2.circle(disp, (ppx, ppy), 7, dot, -1)
+        cv2.putText(disp, "CENTRO", (cxh - R, cyh + R + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (210, 210, 210), 1, cv2.LINE_AA)
+
         state["frame"] = disp
         return state
 
@@ -214,56 +260,89 @@ class FaceController:
     def _update_logic(self, off_x, off_y, left_ear, right_ear):
         now = time.time()
 
-        # ---- calibracao da posicao neutra ----
+        # ---- calibracao inicial (media de poucos frames) ----
         if not self.calibrated:
             self._calib_samples.append((off_x, off_y))
             if len(self._calib_samples) >= self._calib_target:
                 arr = np.array(self._calib_samples)
-                self._neutral = (float(arr[:, 0].mean()), float(arr[:, 1].mean()))
+                self._neutral = [float(arr[:, 0].mean()), float(arr[:, 1].mean())]
                 self.calibrated = True
-                self._sx, self._sy = 0.0, 0.0
+                self._sx = self._sy = 0.0
+                self._armed = False
+                self._active_dir = None
+                self._repeat_count = 0
+                self._stable_ref = (off_x, off_y)
+                self._stable_since = now
+                self._last_step_time = now
             return {
                 "found": True, "step": None, "click": False, "cancel": False,
-                "left_ear": left_ear, "right_ear": right_ear,
-                "hold_dir": None, "calibrated": False, "backend": self.backend,
-                "frame": None,
+                "left_ear": left_ear, "right_ear": right_ear, "hold_dir": None,
+                "dx": 0.0, "dy": 0.0, "armed": False,
+                "calibrated": False, "backend": self.backend, "frame": None,
             }
 
-        # ---- offset relativo + suavizacao ----
-        dx = off_x - self._neutral[0]
-        dy = off_y - self._neutral[1]
+        # ---- offset relativo ao neutro + suavizacao ----
         a = self.smooth
-        self._sx = a * self._sx + (1 - a) * dx
-        self._sy = a * self._sy + (1 - a) * dy
+        self._sx = a * self._sx + (1 - a) * (off_x - self._neutral[0])
+        self._sy = a * self._sy + (1 - a) * (off_y - self._neutral[1])
         dx, dy = self._sx, self._sy
 
-        # ---- direcao (horizontal invertida: cabeca p/ direita = cursor direita) ----
-        horiz = vert = None
-        if dx < -self.deadzone:
-            horiz = "RIGHT"
-        elif dx > self.deadzone:
-            horiz = "LEFT"
-        if dy > self.deadzone:
-            vert = "DOWN"
-        elif dy < -self.deadzone:
-            vert = "UP"
+        # ---- re-centragem automatica: cabeca parada por um tempo vira o centro ----
+        # (conserta calibracao ruim e mudanca de postura; so age quando NAO ha
+        #  movimento acontecendo, para nao atrapalhar uma inclinacao intencional)
+        if self._stable_ref is None:
+            self._stable_ref = (off_x, off_y)
+            self._stable_since = now
+        if abs(off_x - self._stable_ref[0]) + abs(off_y - self._stable_ref[1]) > self.stable_band:
+            self._stable_ref = (off_x, off_y)     # mexeu -> reinicia o cronometro
+            self._stable_since = now
+        idle = (now - self._last_step_time) > self.idle_recenter
+        if idle and (now - self._stable_since) > self.stable_time:
+            self._neutral = [off_x, off_y]        # este ponto passa a ser o centro
+            self._sx = self._sy = 0.0
+            dx = dy = 0.0
+            self._armed = True
+            self._active_dir = None
+            self._repeat_count = 0
+            self._stable_since = now              # evita re-centrar todo frame
 
-        if horiz and vert:
-            hold = horiz if abs(dx) >= abs(dy) else vert
-        else:
-            hold = horiz or vert
+        # ---- direcao candidata (so se passar do gatilho); horizontal invertido ----
+        cand = None
+        if abs(dx) >= self.trigger or abs(dy) >= self.trigger:
+            if abs(dx) >= abs(dy):
+                cand = "RIGHT" if dx < 0 else "LEFT"
+            else:
+                cand = "DOWN" if dy > 0 else "UP"
 
-        # ---- gerar passos (primeiro imediato, depois repete) ----
+        inside = abs(dx) < self.deadzone and abs(dy) < self.deadzone
+
+        # ---- maquina de estados: "inclina-e-volta" + auto-repeticao limitada ----
         step = None
-        if hold is None:
-            self._held = None
-        elif hold != self._held:
-            self._held = hold
-            self._next_step = now + self.repeat_delay
-            step = hold
-        elif now >= self._next_step:
-            self._next_step = now + self.repeat_delay
-            step = hold
+        if inside:
+            self._armed = True            # voltou ao centro -> pronto p/ novo gesto
+            self._active_dir = None
+            self._repeat_count = 0
+        elif cand is not None:
+            if self._armed:               # gesto novo: 1 passo imediato
+                step = cand
+                self._armed = False
+                self._active_dir = cand
+                self._repeat_count = 0
+                self._next_repeat = now + self.hold_delay
+            elif cand == self._active_dir and now >= self._next_repeat:
+                if self._repeat_count < self.max_repeats:
+                    step = cand           # segurou na mesma direcao -> auto-repete
+                    self._repeat_count += 1
+                    self._next_repeat = now + self.repeat_rate
+                else:
+                    self._active_dir = None   # atingiu o limite -> trava ate centrar
+            elif cand != self._active_dir:
+                self._active_dir = None   # trocou de direcao sem centrar -> trava
+        # zona intermediaria (entre deadzone e trigger): nao faz nada
+
+        if step is not None:
+            self._last_step_time = now
+        self._dx, self._dy = dx, dy
 
         # ---- winks (clique = olho esquerdo, cancelar = olho direito) ----
         click = cancel = False
@@ -284,18 +363,21 @@ class FaceController:
 
         return {
             "found": True, "step": step, "click": click, "cancel": cancel,
-            "left_ear": left_ear, "right_ear": right_ear,
-            "hold_dir": hold, "calibrated": True, "backend": self.backend,
-            "frame": None,
+            "left_ear": left_ear, "right_ear": right_ear, "hold_dir": cand,
+            "dx": dx, "dy": dy, "armed": self._armed,
+            "calibrated": True, "backend": self.backend, "frame": None,
         }
 
     # ------------------------------------------------------------------ #
     def _empty_state(self, frame):
-        # rosto perdido: zera estados de passo/wink para nao "grudar"
-        self._held = None
+        # rosto perdido: zera estados de movimento para nao "grudar"
+        self._armed = False
+        self._active_dir = None
+        self._repeat_count = 0
         return {
             "found": False, "step": None, "click": False, "cancel": False,
             "left_ear": 0.0, "right_ear": 0.0, "hold_dir": None,
+            "dx": 0.0, "dy": 0.0, "armed": False,
             "calibrated": self.calibrated, "backend": self.backend,
             "frame": frame,
         }

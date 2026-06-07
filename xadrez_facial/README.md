@@ -92,19 +92,37 @@ xadrez_facial/
 
 ---
 
+## 🕹️ Como o controle da cabeça funciona (importante)
+
+O movimento é por **gesto, não por "empurrar"**: você **inclina a cabeça e volta
+ao centro** para dar **1 passo** (como teclas de seta). Se **segurar** inclinado,
+ele passa a repetir num ritmo controlado (para atravessar o tabuleiro). Isso
+elimina o antigo problema de o cursor "andar infinito" para um lado.
+
+No canto da câmera há um **HUD**: um ponto que mostra a posição da sua cabeça,
+o quadrado **verde** (centro/zona morta) e o **azul** (gatilho). Em repouso o
+ponto deve ficar no verde; se não ficar, aperte **C** ou fique parado ~1s (ele
+**re-centra sozinho**).
+
 ## 🔧 Ajuste fino (se precisar)
 
 Em `face_controller.py`, no construtor de `FaceController`:
 
-- `deadzone` (padrão `0.06`): **sensibilidade da cabeça**. Menor = mais sensível.
-- `repeat_delay` (padrão `0.45`): tempo entre passos do cursor ao segurar a cabeça.
+- `deadzone` (padrão `0.04`): tamanho da zona "centro" (re-arma o gesto).
+- `trigger` (padrão `0.085`): o quanto inclinar para disparar 1 passo. **Menor =
+  mais sensível** (dispara com menos inclinação).
+- `hold_delay` / `repeat_rate` (padrão `0.6` / `0.45`): atraso para começar a
+  auto-repetir ao segurar, e o intervalo entre os passos repetidos.
+- `max_repeats` (padrão `7`): teto de passos seguidos sem voltar ao centro
+  (trava de segurança contra movimento infinito).
 - `ear_closed` / `ear_open` (padrão `0.21` / `0.27`): limiares da piscada.
 - `wink_diff` (padrão `0.06`): o quão assimétrica a piscada precisa ser para
   contar como *wink* de um olho só (evita disparar numa piscada normal).
 
-**Dicas de uso:** boa iluminação frontal ajuda muito; ao abrir, olhe para a
-tela em posição neutra (a calibração é automática) — aperte `C` para recalibrar
-a qualquer momento; se não conseguir piscar um olho só, use `Enter`/`Backspace`.
+**Dicas de uso:** boa iluminação frontal ajuda muito; ao abrir, olhe para a tela
+e fique parado um instante (calibra/re-centra sozinho) — aperte `C` para
+recalibrar quando quiser; se não conseguir piscar um olho só, use
+`Enter`/`Backspace`. Para testar a lógica sem câmera: `python test_movimento.py`.
 
 ---
 
