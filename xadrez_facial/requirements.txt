@@ -1,0 +1,10 @@
+# Xadrez controlado pelo rosto - dependencias
+# Testado com Python 3.14 no Windows (wheels disponiveis).
+# IMPORTANTE: usar opencv-contrib-python (e nao opencv-python) porque o
+# mediapipe ja o instala; ter os dois juntos quebra o modulo cv2.
+
+mediapipe>=0.10.35
+opencv-contrib-python>=4.13
+chess>=1.11
+numpy>=2.0
+Pillow>=10.0

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "mcp__e3138c70-ee06-43bb-bbd9-dd4cd87f9a7d__request-outline-review"
+    ]
+  }
+}
