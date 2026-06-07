@@ -250,9 +250,9 @@ class BoardUI:
 
         # ajuda (rodape)
         help_lines = [
-            "Cabeca move o cursor | olho esq = clique | olho dir = cancelar",
-            "Teclado: setas/WASD mover, Enter clicar, Backspace cancelar",
-            "C calibrar | 1 vs IA | 2 dois jogadores | R reiniciar | ESC sair",
+            "Incline a cabeca e VOLTE ao centro = 1 passo (segure = repete)",
+            "Olho esq = clique | olho dir = cancelar | C = recalibrar centro",
+            "Teclado: setas/WASD, Enter, Backspace | 1 vs IA  2 2P  R  ESC",
         ]
         for i, line in enumerate(help_lines):
             d.text((px, 706 + i * 20), line, font=f_small, fill=(150, 150, 160), anchor="lm")
